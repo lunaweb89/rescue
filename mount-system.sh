@@ -10,10 +10,10 @@
 #  - Enters chroot /mnt /bin/bash
 #
 # Usage (from rescue):
-#   curl -fsSL https://raw.githubusercontent.com/USERNAME/REPO/main/mount-system.sh | bash
+#   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/rescue/main/mount-system.sh)
 #
 # Or:
-#   wget -O enter-real-system.sh https://raw.githubusercontent.com/USERNAME/REPO/main/mount-system.sh
+#   wget -O enter-real-system.sh https://raw.githubusercontent.com/lunaweb89/rescue/main/mount-system.sh
 #   chmod +x mount-system.sh
 #   ./mount-system.sh
 #
