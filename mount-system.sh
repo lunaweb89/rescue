@@ -2,20 +2,16 @@
 #
 # mount-system.sh
 #
-# Helper to run from rescue mode (e.g. Hetzner):
-#  - Detects the installed system's root filesystem
-#  - Mounts it on /mnt
-#  - Uses /mnt/etc/fstab to mount /boot and /boot/efi if configured
-#  - Binds /proc, /sys, /dev, /run
-#  - Enters chroot /mnt /bin/bash
+# Automatically detect and mount your REAL server filesystem from Hetzner Rescue Mode.
+# Steps performed:
+#   - Detect real root filesystem (RAID md*, ext4, xfs, btrfs)
+#   - Mount root filesystem on /mnt
+#   - Auto-mount /boot and /boot/efi based on /mnt/etc/fstab
+#   - Bind /proc, /sys, /dev, /run
+#   - chroot into the REAL system
 #
-# Usage (from rescue):
+# Run directly from GitHub:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/rescue/main/mount-system.sh)
-#
-# Or:
-#   wget -O enter-real-system.sh https://raw.githubusercontent.com/lunaweb89/rescue/main/mount-system.sh
-#   chmod +x mount-system.sh
-#   ./mount-system.sh
 #
 
 set -euo pipefail
@@ -27,16 +23,15 @@ require_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     err "This script must be run as root."
     exit 1
-  fi
+  }
 }
 
-# Detect a likely root filesystem device:
-#  - prefer RAID md devices (md*)
-#  - otherwise pick first ext4/xfs/btrfs that is not mounted
+# Detect the installed OS's real root device
 detect_root_device() {
-  # Prefer md* devices with ext4/xfs/btrfs
   local root_dev
-  root_dev=$(lsblk -pnro NAME,FSTYPE,MOUNTPOINT 2>/dev/null \
+
+  # Prefer RAID md arrays with ext4/xfs/btrfs
+  root_dev=$(lsblk -pnro NAME,FSTYPE,MOUNTPOINT \
     | awk '$2 ~ /(ext4|xfs|btrfs)/ && $3 == "" && $1 ~ /md[0-9]+$/ {print $1; exit}')
 
   if [[ -n "${root_dev:-}" ]]; then
@@ -44,8 +39,8 @@ detect_root_device() {
     return 0
   fi
 
-  # Fallback: any unmounted ext4/xfs/btrfs
-  root_dev=$(lsblk -pnro NAME,FSTYPE,MOUNTPOINT 2>/dev/null \
+  # Fallback: any standalone ext4/xfs/btrfs partition unmounted
+  root_dev=$(lsblk -pnro NAME,FSTYPE,MOUNTPOINT \
     | awk '$2 ~ /(ext4|xfs|btrfs)/ && $3 == "" {print $1; exit}')
 
   if [[ -n "${root_dev:-}" ]]; then
@@ -56,17 +51,14 @@ detect_root_device() {
   return 1
 }
 
-# Resolve UUID= / LABEL= to an actual device
 resolve_fstab_spec() {
   local spec="$1"
+
   if [[ "$spec" =~ ^UUID= ]]; then
-    local uuid="${spec#UUID=}"
-    blkid -U "$uuid" 2>/dev/null || return 1
+    blkid -U "${spec#UUID=}" 2>/dev/null || return 1
   elif [[ "$spec" =~ ^LABEL= ]]; then
-    local label="${spec#LABEL=}"
-    blkid -L "$label" 2>/dev/null || return 1
+    blkid -L "${spec#LABEL=}" 2>/dev/null || return 1
   else
-    # Assume it's a direct device path (/dev/...)
     echo "$spec"
   fi
 }
@@ -81,47 +73,40 @@ mount_if_not_mounted() {
   fi
 
   mkdir -p "$mnt"
-  log "Mounting $dev on $mnt..."
+  log "Mounting $dev → $mnt"
   mount "$dev" "$mnt"
 }
 
 mount_root() {
   local root_dev
   root_dev=$(detect_root_device) || {
-    err "Could not auto-detect root filesystem device. Please mount manually."
+    err "Unable to detect root filesystem automatically."
     exit 1
   }
 
   log "Detected root device: $root_dev"
-
-  if mountpoint -q /mnt; then
-    log "/mnt already mounted, skipping root mount."
-  else
-    mkdir -p /mnt
-    log "Mounting root filesystem..."
-    mount "$root_dev" /mnt
-  fi
+  mount_if_not_mounted "$root_dev" /mnt
 }
 
 mount_from_fstab() {
-  local target="$1"   # e.g. /boot or /boot/efi
+  local target="$1"
   local fstab_dev
 
   if [[ ! -f /mnt/etc/fstab ]]; then
-    err "/mnt/etc/fstab not found; skipping $target mount."
+    log "WARNING: /mnt/etc/fstab not found. Skipping $target."
     return 0
   fi
 
   fstab_dev=$(awk -v t="$target" '$1 !~ /^#/ && $2 == t {print $1; exit}' /mnt/etc/fstab || true)
 
-  if [[ -z "${fstab_dev:-}" ]]; then
-    log "No $target entry in /mnt/etc/fstab; skipping $target."
+  if [[ -z "$fstab_dev" ]]; then
+    log "fstab: No entry for $target"
     return 0
   fi
 
   local real_dev
   real_dev=$(resolve_fstab_spec "$fstab_dev") || {
-    err "Failed to resolve $fstab_dev for $target."
+    err "Could not resolve device for $target ($fstab_dev)"
     return 0
   }
 
@@ -129,7 +114,7 @@ mount_from_fstab() {
 }
 
 bind_system_dirs() {
-  log "Binding /proc, /sys, /dev, /run into chroot..."
+  log "Binding system directories..."
 
   mount -t proc proc /mnt/proc || true
   mount --rbind /sys /mnt/sys || true
@@ -139,33 +124,38 @@ bind_system_dirs() {
 
 summary() {
   echo
-  echo "=================="
-  echo " Chroot Environment"
-  echo "=================="
-  echo "Mounted:"
-  mount | grep "^/dev" | grep "/mnt" || true
+  echo "============================="
+  echo " Real System Mount Summary"
+  echo "============================="
+  mount | grep "/mnt" || true
   echo
-  echo "You are about to enter your REAL system:"
-  echo "  chroot /mnt /bin/bash"
+  echo "You are now inside your REAL server."
+  echo "Use commands normally, for example:"
+  echo "  passwd root"
+  echo "  nano /etc/ssh/sshd_config.d/99-hardening.conf"
+  echo "  systemctl restart sshd   (ignored but safe)"
+  echo
+  echo "When finished, exit chroot:"
+  echo "  exit"
   echo
 }
 
 main() {
   require_root
 
-  log "Detecting and mounting real root filesystem..."
+  log "Mounting real root filesystem..."
   mount_root
 
-  log "Attempting to mount /boot (if present in fstab)..."
+  log "Mounting /boot (if defined)..."
   mount_from_fstab "/boot"
 
-  log "Attempting to mount /boot/efi (if present in fstab)..."
+  log "Mounting /boot/efi (if defined)..."
   mount_from_fstab "/boot/efi"
 
   bind_system_dirs
   summary
 
-  log "Entering chroot now: /mnt"
+  log "Entering chroot → /mnt ..."
   exec chroot /mnt /bin/bash
 }
 
